@@ -5,6 +5,9 @@ use clap::Parser;
 use mfl_audit::stream_parser::MflStream;
 use mfl_audit::grid::build_grid;
 use mfl_audit::hough::{HoughDetector, DefectClass};
+use mfl_audit::defect_extract::extract_defect_cubes;
+use mfl_audit::depth_inversion::invert_all_cubes;
+use mfl_audit::ascii_plot::{print_ascii_pipe_map, print_defect_evolution_curve, CorrosionMapConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "mfl-audit", about = "Pipeline MFL raw-data discrete audit tool")]
@@ -35,6 +38,12 @@ struct Cli {
 
     #[arg(long, short, help = "Output defect report as CSV")]
     output: Option<PathBuf>,
+
+    #[arg(long, short = 'I', help = "Enable non-linear magnetic-dipole depth inversion (Levenberg-Marquardt GN)")]
+    invert_depth: bool,
+
+    #[arg(long, default_value_t = 1.0, help = "Sensor lift-off distance (mm) above OD for inversion model")]
+    sensor_lift_mm: f32,
 }
 
 fn main() {
@@ -147,6 +156,69 @@ fn main() {
         match std::fs::write(path, &csv) {
             Ok(_) => eprintln!("[mfl-audit] Report written to {:?}", path),
             Err(e) => eprintln!("[ERROR] Failed to write report: {e}"),
+        }
+    }
+
+    if cli.invert_depth && !defects.is_empty() {
+        eprintln!("[mfl-audit] Extracting 3-axis defect cubes for depth inversion...");
+        let cubes = extract_defect_cubes(
+            &stream,
+            &defects,
+            cli.nominal_velocity,
+            cli.median_window,
+            cli.sigma_threshold,
+            hdr.wall_thickness_mm,
+        );
+        eprintln!("[mfl-audit] Running magnetic-dipole inverse solver on {} cube(s) (wall={}mm lift={}mm)...",
+            cubes.len(), hdr.wall_thickness_mm, cli.sensor_lift_mm);
+        let depth_results = invert_all_cubes(
+            &cubes,
+            hdr.wall_thickness_mm as f64,
+            cli.sensor_lift_mm as f64,
+        );
+
+        let total_dist_mm = stream
+            .frame(stream.num_frames().saturating_sub(1))
+            .map(|f| f.hdr.distance_mm as f64)
+            .unwrap_or(stream.num_frames() as f64 * 0.5);
+
+        let map_cfg = CorrosionMapConfig {
+            wall_thickness_mm: hdr.wall_thickness_mm as f64,
+            ..CorrosionMapConfig::default()
+        };
+        print_ascii_pipe_map(&depth_results, &defects, &map_cfg, total_dist_mm);
+        print_defect_evolution_curve(&depth_results, total_dist_mm, 60);
+
+        if let Some(ref path) = cli.output {
+            let inv_path = path.with_extension("depth.csv");
+            let mut csv = String::from(
+                "region_id,distance_mm,angle_deg,length_mm,width_mm,depth_um,volume_mm3,severity,pct_wall,residual_rel,iterations,converged\n"
+            );
+            for r in &depth_results {
+                let pct = if hdr.wall_thickness_mm > 0.0 {
+                    r.geometry.depth_um * 1e-3 / hdr.wall_thickness_mm as f64 * 100.0
+                } else { 0.0 };
+                let sev_label = format!("{:?}", r.severity);
+                csv.push_str(&format!(
+                        "{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                        r.region_id,
+                        r.geometry.pos_x_mm,
+                        r.geometry.pos_y_mm,
+                        r.geometry.length_mm,
+                        r.geometry.width_mm,
+                        r.geometry.depth_um,
+                        r.geometry.volume_mm3(),
+                        sev_label,
+                        pct,
+                        r.residual_rel,
+                        r.iterations,
+                        r.converged,
+                ));
+            }
+            match std::fs::write(&inv_path, &csv) {
+                Ok(_) => eprintln!("[mfl-audit] Depth inversion CSV written to {:?}", inv_path),
+                Err(e) => eprintln!("[ERROR] Failed to write depth CSV: {e}"),
+            }
         }
     }
 

@@ -19,7 +19,7 @@ impl VelocityCorrector {
         }
     }
 
-    fn load_channel_from_owned(
+    pub fn load_channel_from_owned(
         &self,
         stream: &crate::stream_parser::MflStream,
         channel: u16,
