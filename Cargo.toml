@@ -1,0 +1,15 @@
+[package]
+name = "mfl-audit"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memmap2 = "0.9"
+clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
